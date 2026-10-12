@@ -1712,9 +1712,9 @@ export default function BoardView({ boardId }: Props) {
         <Modal
           title="Share this board"
           onClose={() => setModal(null)}
-          className="min-w-0 gap-4 sm:max-w-xl"
+          className="w-[calc(100vw-2rem)] min-w-0 gap-4 overflow-x-hidden sm:max-w-xl"
         >
-          <DialogDescription className="text-sm leading-5 text-slate-500">
+          <DialogDescription className="w-full min-w-0 whitespace-normal break-words text-sm leading-5 text-slate-500">
             Choose a view link or an edit link. Creating a replacement disables the previous link
             with the same access.
           </DialogDescription>
@@ -1731,57 +1731,62 @@ export default function BoardView({ boardId }: Props) {
               return (
                 <div
                   key={access}
-                  className="flex min-w-0 flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center"
+                  className="grid w-full min-w-0 grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
                 >
-                  <div className="shrink-0 sm:w-24">
+                  <div className="min-w-0 space-y-1">
                     <p className="text-sm font-semibold text-slate-800">
                       {access === 'view' ? 'View only' : 'Can edit'}
                     </p>
+                    {share?.token ? (
+                      <p
+                        className="w-full min-w-0 truncate text-xs text-slate-500"
+                        title={shareUrl(share.token)}
+                      >
+                        {shareUrl(share.token)}
+                      </p>
+                    ) : (
+                      <p className="w-full min-w-0 text-xs text-slate-500">
+                        {share ? 'Link is active. Create a new one to copy it.' : 'No link yet'}
+                      </p>
+                    )}
                   </div>
-                  {share?.token ? (
-                    <p className="min-w-0 flex-1 truncate text-xs text-slate-500">
-                      {shareUrl(share.token)}
-                    </p>
-                  ) : (
-                    <p className="min-w-0 flex-1 text-xs text-slate-500">
-                      {share ? 'Link is active. Create a new one to copy it.' : 'No link yet'}
-                    </p>
-                  )}
-                  {share?.token && (
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                    {share?.token && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => void copyShareLink(share.token!)}
+                      >
+                        Copy link
+                      </Button>
+                    )}
                     <Button
                       type="button"
-                      variant="outline"
+                      variant={share?.token ? 'ghost' : 'outline'}
                       size="sm"
                       className="shrink-0"
-                      onClick={() => void copyShareLink(share.token!)}
-                    >
-                      Copy link
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant={share?.token ? 'ghost' : 'outline'}
-                    size="sm"
-                    className="shrink-0"
-                    disabled={Boolean(pendingShareAction)}
-                    onClick={() => void createShare(access)}
-                  >
-                    {creating && <Spinner />}
-                    {share ? 'Create new' : 'Create link'}
-                  </Button>
-                  {share && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="shrink-0 text-slate-500"
-                      aria-label={`Revoke ${access} link`}
                       disabled={Boolean(pendingShareAction)}
-                      onClick={() => void revokeLink(share.id)}
+                      onClick={() => void createShare(access)}
                     >
-                      {revoking ? <Spinner /> : 'Revoke'}
+                      {creating && <Spinner />}
+                      {share ? 'Create new' : 'Create link'}
                     </Button>
-                  )}
+                    {share && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 text-slate-500"
+                        aria-label={`Revoke ${access} link`}
+                        disabled={Boolean(pendingShareAction)}
+                        onClick={() => void revokeLink(share.id)}
+                      >
+                        {revoking ? <Spinner /> : 'Revoke'}
+                      </Button>
+                    )}
+                  </div>
                 </div>
               );
             })}
