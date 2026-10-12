@@ -490,6 +490,7 @@ export default function BoardView({ boardId }: Props) {
   const [board, setBoard] = useState<Board | null>(null);
   const [ownedBoards, setOwnedBoards] = useState<Array<{ id: string; name: string }>>([]);
   const [permission, setPermission] = useState<Permission>('view');
+  const [activeCollaborators, setActiveCollaborators] = useState<string[]>([]);
   const [token] = useState(readInitialToken);
   const [guestProfile, setGuestProfile] = useState<GuestProfile | null>(() =>
     readGuestProfile(boardId, token),
@@ -522,13 +523,11 @@ export default function BoardView({ boardId }: Props) {
     confirmLabel: string;
     onConfirm: () => Promise<void>;
   } | null>(null);
-  const [sharePermission, setSharePermission] = useState<'view' | 'edit'>('view');
-  const [expiration, setExpiration] = useState('');
   const [pendingShareAction, setPendingShareAction] = useState<string | null>(null);
   const [createdLinks, setCreatedLinks] = useState<
     Array<{
       id: string;
-      permission: string;
+      permission: 'view' | 'edit';
       token?: string;
       revoked_at?: string;
       expires_at?: string;
@@ -537,6 +536,7 @@ export default function BoardView({ boardId }: Props) {
   const readOnly = permission === 'view';
   const currentUserName =
     permission === 'owner' ? ownerDisplayName : guestProfile?.name || 'Viewer';
+  const boardReady = Boolean(board);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const request = useCallback(
     (url: string, init: RequestInit = {}) =>
@@ -612,6 +612,28 @@ export default function BoardView({ boardId }: Props) {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load, token]);
+  useEffect(() => {
+    if (!boardReady || (permission !== 'owner' && !guestProfile)) return;
+
+    const supabase = browserDb();
+    const channel = supabase
+      .channel(`board-presence:${boardId}`)
+      .on('presence', { event: 'sync' }, () => {
+        const names = Object.values(channel.presenceState<{ name?: string }>())
+          .flatMap((sessions) => sessions.map((session) => session.name?.trim()))
+          .filter((name): name is string => Boolean(name) && name !== currentUserName);
+        setActiveCollaborators([...new Set(names)]);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          void channel.track({ name: currentUserName });
+        }
+      });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [boardId, boardReady, currentUserName, guestProfile, permission]);
   const notify = (message: string, kind: 'success' | 'error' = 'success') =>
     kind === 'error' ? toast.error(message) : toast.success(message);
   function askConfirmation(confirmation: {
@@ -890,36 +912,49 @@ export default function BoardView({ boardId }: Props) {
       notify(e instanceof Error ? e.message : 'Could not duplicate task.', 'error');
     }
   }
-  async function createShare(e: FormEvent) {
-    e.preventDefault();
-    setBusy(true);
+  async function createShare(permission: 'view' | 'edit') {
+    const action = `create:${permission}`;
+    setPendingShareAction(action);
     try {
       const r = await request('/api/shares', {
         method: 'POST',
         body: JSON.stringify({
           board_id: boardId,
-          permission: sharePermission,
-          expires_at: expiration ? new Date(expiration).toISOString() : null,
+          permission,
         }),
       });
       const d = await r.json();
       if (!r.ok) throw Error(d.error);
-      setCreatedLinks((x) => [d, ...x]);
+      const replacedAt = new Date().toISOString();
+      setCreatedLinks((links) => [
+        d,
+        ...links.map((link) =>
+          link.permission === permission && !link.revoked_at
+            ? { ...link, revoked_at: replacedAt }
+            : link,
+        ),
+      ]);
       notify('Sharing link created');
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Could not create link.', 'error');
     } finally {
-      setBusy(false);
+      setPendingShareAction(null);
     }
   }
   async function revokeLink(id: string) {
     setPendingShareAction(`revoke:${id}`);
     try {
+      const target = createdLinks.find((link) => link.id === id);
       const r = await request(`/api/shares/${id}`, { method: 'DELETE' });
       const d = await r.json();
       if (!r.ok) throw Error(d.error);
+      const revokedAt = new Date().toISOString();
       setCreatedLinks((x) =>
-        x.map((s) => (s.id === id ? { ...s, revoked_at: new Date().toISOString() } : s)),
+        x.map((s) =>
+          s.id === id || (target && s.permission === target.permission && !s.revoked_at)
+            ? { ...s, revoked_at: revokedAt }
+            : s,
+        ),
       );
       notify('Link revoked');
     } catch (e) {
@@ -1027,7 +1062,9 @@ export default function BoardView({ boardId }: Props) {
     return matchesSearch && matchesPriority && matchesDue;
   });
   const isOwner = permission === 'owner';
-  const shareActive = createdLinks.some((x) => !x.revoked_at);
+  const shareActive = createdLinks.some(
+    (link) => !link.revoked_at && (!link.expires_at || new Date(link.expires_at) > new Date()),
+  );
   return (
     <main className="board-app min-h-screen">
       <header className="board-topbar sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 backdrop-blur-xl">
@@ -1139,6 +1176,32 @@ export default function BoardView({ boardId }: Props) {
               >
                 <Plus size={16} /> <span className="hidden sm:inline">New project</span>
               </Button>
+            )}
+            {activeCollaborators.length > 0 && (
+              <div
+                className="flex shrink-0 items-center pl-1 sm:pl-2"
+                aria-label={`${activeCollaborators.length} other ${activeCollaborators.length === 1 ? 'person' : 'people'} active on this board`}
+              >
+                <div className="flex -space-x-2">
+                  {activeCollaborators.slice(0, 3).map((name) => (
+                    <Avatar
+                      key={name}
+                      className="size-8 border-2 border-white"
+                      title={`${name} is active on this board`}
+                    >
+                      <AvatarFallback className="bg-emerald-100 text-[11px] font-semibold text-emerald-800">
+                        {getInitials(name)}
+                      </AvatarFallback>
+                    </Avatar>
+                  ))}
+                  {activeCollaborators.length > 3 && (
+                    <span className="flex size-8 items-center justify-center rounded-full border-2 border-white bg-slate-100 text-[10px] font-semibold text-slate-600">
+                      +{activeCollaborators.length - 3}
+                    </span>
+                  )}
+                </div>
+                <span className="sr-only">{activeCollaborators.join(', ')}</span>
+              </div>
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1649,93 +1712,81 @@ export default function BoardView({ boardId }: Props) {
         <Modal
           title="Share this board"
           onClose={() => setModal(null)}
-          className="flex max-h-[85dvh] min-w-0 flex-col gap-3 overflow-hidden"
+          className="min-w-0 gap-4 sm:max-w-xl"
         >
-          <DialogDescription className="min-w-0 text-sm leading-5 text-slate-500">
-            Create a private link for collaborators. Anyone with an edit link can make changes.
+          <DialogDescription className="text-sm leading-5 text-slate-500">
+            Choose a view link or an edit link. Creating a replacement disables the previous link
+            with the same access.
           </DialogDescription>
-          <form onSubmit={createShare} className="min-w-0 shrink-0 space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Label className="text-sm font-medium">
-                Access
-                <StyledDropdown
-                  ariaLabel="Share access level"
-                  value={sharePermission}
-                  onChange={(value) => setSharePermission(value as 'view' | 'edit')}
-                  options={[
-                    { value: 'view', label: 'View only' },
-                    { value: 'edit', label: 'Can edit' },
-                  ]}
-                />
-              </Label>
-              <Label className="text-sm font-medium">
-                Expires <span className="font-normal text-slate-400">(optional)</span>
-                <DatePicker
-                  value={expiration}
-                  onChange={setExpiration}
-                  ariaLabel="Link expiration date"
-                />
-              </Label>
-            </div>
-            <Button type="submit" className="w-full" disabled={busy}>
-              {busy && <Spinner />}
-              {busy
-                ? 'Creating link…'
-                : `Create ${sharePermission === 'view' ? 'view' : 'edit'} link`}
-            </Button>
-          </form>
-          {createdLinks.length > 0 && (
-            <div className="max-h-[25dvh] min-h-0 min-w-0 space-y-2 overflow-y-auto overflow-x-hidden overscroll-contain border-t pt-3 pr-1">
-              {createdLinks.map((s) => (
+          <div className="space-y-2">
+            {(['view', 'edit'] as const).map((access) => {
+              const share = createdLinks.find(
+                (link) =>
+                  link.permission === access &&
+                  !link.revoked_at &&
+                  (!link.expires_at || new Date(link.expires_at) > new Date()),
+              );
+              const creating = pendingShareAction === `create:${access}`;
+              const revoking = share && pendingShareAction === `revoke:${share.id}`;
+              return (
                 <div
-                  key={s.id}
-                  className="flex min-w-0 flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"
+                  key={access}
+                  className="flex min-w-0 flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center"
                 >
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">
-                      {s.permission === 'edit' ? 'Can edit' : 'View only'}
-                      {s.revoked_at ? ' · Revoked' : ''}
-                    </div>
-                    {s.token && (
-                      <p className="truncate text-xs text-slate-500">{shareUrl(s.token)}</p>
-                    )}
+                  <div className="shrink-0 sm:w-24">
+                    <p className="text-sm font-semibold text-slate-800">
+                      {access === 'view' ? 'View only' : 'Can edit'}
+                    </p>
                   </div>
-                  <div className="flex w-full min-w-0 gap-2 sm:w-auto sm:shrink-0">
-                    {s.token && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="min-w-0 flex-1 sm:flex-none"
-                        onClick={() => void copyShareLink(s.token!)}
-                      >
-                        Copy
-                      </Button>
-                    )}
-                    {!s.revoked_at && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="min-w-0 flex-1 sm:flex-none"
-                        disabled={pendingShareAction === `revoke:${s.id}`}
-                        onClick={() => void revokeLink(s.id)}
-                      >
-                        {pendingShareAction === `revoke:${s.id}` ? (
-                          <>
-                            <Spinner /> Revoking…
-                          </>
-                        ) : (
-                          'Revoke'
-                        )}
-                      </Button>
-                    )}
-                  </div>
+                  {share?.token ? (
+                    <p className="min-w-0 flex-1 truncate text-xs text-slate-500">
+                      {shareUrl(share.token)}
+                    </p>
+                  ) : (
+                    <p className="min-w-0 flex-1 text-xs text-slate-500">
+                      {share ? 'Link is active. Create a new one to copy it.' : 'No link yet'}
+                    </p>
+                  )}
+                  {share?.token && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => void copyShareLink(share.token!)}
+                    >
+                      Copy link
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant={share?.token ? 'ghost' : 'outline'}
+                    size="sm"
+                    className="shrink-0"
+                    disabled={Boolean(pendingShareAction)}
+                    onClick={() => void createShare(access)}
+                  >
+                    {creating && <Spinner />}
+                    {share ? 'Create new' : 'Create link'}
+                  </Button>
+                  {share && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0 text-slate-500"
+                      aria-label={`Revoke ${access} link`}
+                      disabled={Boolean(pendingShareAction)}
+                      onClick={() => void revokeLink(share.id)}
+                    >
+                      {revoking ? <Spinner /> : 'Revoke'}
+                    </Button>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-          <DialogFooter className="mt-4">
+              );
+            })}
+          </div>
+          <DialogFooter>
             <Button type="button" variant="ghost" size="sm" onClick={() => setModal(null)}>
               Done
             </Button>

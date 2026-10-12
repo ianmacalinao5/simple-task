@@ -5,7 +5,6 @@ import { authorize, fail, hashToken, newToken } from '@/lib/authorize';
 const schema = z.object({
   board_id: z.string().uuid(),
   permission: z.enum(['view', 'edit']),
-  expires_at: z.string().datetime().nullable().optional(),
 });
 export async function GET(request: NextRequest) {
   try {
@@ -29,18 +28,30 @@ export async function POST(request: NextRequest) {
     const body = schema.parse(await request.json());
     const a = await authorize(request, body.board_id, true);
     if (a.permission !== 'owner') throw new Error('Only the owner can manage sharing.');
+    const db = adminDb();
     const token = newToken();
-    const { data, error } = await adminDb()
+    const { data, error } = await db
       .from('share_links')
       .insert({
         board_id: body.board_id,
         permission: body.permission,
-        expires_at: body.expires_at || null,
+        expires_at: null,
         token_hash: hashToken(token),
       })
       .select('id,permission,expires_at,created_at')
       .single();
     if (error) throw error;
+    const { error: revokeError } = await db
+      .from('share_links')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('board_id', body.board_id)
+      .eq('permission', body.permission)
+      .is('revoked_at', null)
+      .neq('id', data.id);
+    if (revokeError) {
+      await db.from('share_links').delete().eq('id', data.id);
+      throw revokeError;
+    }
     return Response.json({ ...data, token }, { status: 201 });
   } catch (error) {
     return fail(error);

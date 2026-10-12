@@ -10,7 +10,7 @@ export async function DELETE(
     const db = adminDb();
     const { data: s, error: e } = await db
       .from('share_links')
-      .select('board_id')
+      .select('board_id,permission')
       .eq('id', id)
       .single();
     if (e) throw e;
@@ -19,7 +19,9 @@ export async function DELETE(
     const { error } = await db
       .from('share_links')
       .update({ revoked_at: new Date().toISOString() })
-      .eq('id', id);
+      .eq('board_id', s.board_id)
+      .eq('permission', s.permission)
+      .is('revoked_at', null);
     if (error) throw error;
     return Response.json({ ok: true });
   } catch (error) {
